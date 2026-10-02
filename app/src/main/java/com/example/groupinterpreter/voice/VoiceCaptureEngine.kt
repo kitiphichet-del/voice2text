@@ -10,18 +10,18 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.sqrt
 
 /**
- * Continuously captures 16 kHz mono PCM and transcribes 7-second audio windows on-device.
- * This is near-live chunked translation, not instantaneous word-by-word translation.
- * Bounded queue prevents an unresponsive phone exhausting RAM.
+ * Three-second offline speech windows. Capture continues while transcription runs.
+ * Buffer budget: one frame in Whisper + one queued frame (about 375 KiB total).
+ * If decoding is slower than recording, drop stale *queued* audio to stay responsive,
+ * and make the loss visible to the user. No cloud fallback or fake transcripts.
  */
 class VoiceCaptureEngine {
     private val stopRequested = AtomicBoolean(false)
@@ -31,34 +31,35 @@ class VoiceCaptureEngine {
 
     fun requestStop() {
         stopRequested.set(true)
-        try {
-            recorder?.stop() // Releases a blocking read so that remaining audio can be processed.
-        } catch (_: IllegalStateException) {}
+        try { recorder?.stop() } catch (_: IllegalStateException) {}
     }
 
-    @SuppressLint("MissingPermission") // Runtime permission is verified before starting in ViewModel.
+    @SuppressLint("MissingPermission")
     suspend fun listen(
         modelFile: File,
         language: () -> String,
         onReady: () -> Unit,
+        onCapture: (seconds: Int, level: Int) -> Unit,
+        onProcessing: (chunk: Int) -> Unit,
         onTranscript: (String) -> Unit,
         onDecoded: (Int, Boolean) -> Unit,
         onWarning: (String) -> Unit
     ) {
         if (stopRequested.get()) return
-        var nativeContext = 0L
+        val nativeContext = withContext(Dispatchers.Default) {
+            WhisperBridge.load(modelFile.absolutePath)
+        }
+        require(nativeContext != 0L) { "โหลดโมเดล Whisper ไม่สำเร็จ" }
         try {
-            nativeContext = withContext(Dispatchers.Default) {
-                WhisperBridge.load(modelFile.absolutePath)
-            }
-            require(nativeContext != 0L) { "เปิดโมเดลเสียงไม่ได้ กรุณาดาวน์โหลดอีกครั้ง" }
             if (stopRequested.get()) return
-            val handle = nativeContext
             coroutineScope {
-                val queue = Channel<FloatArray>(capacity = 3)
-                val processor = launch(Dispatchers.Default) {
-                    for (chunk in queue) {
-                        val result = WhisperBridge.transcribe(handle, chunk, language()).trim()
+                val pending = Channel<Pair<Int, FloatArray>>(capacity = 1)
+                val decoder = launch(Dispatchers.Default) {
+                    for ((number, samples) in pending) {
+                        onProcessing(number)
+                        val result = WhisperBridge.transcribe(
+                            nativeContext, samples, language()
+                        ).trim()
                         if (result.isNotEmpty()) onTranscript(result)
                         onDecoded(number, result.isNotEmpty())
                     }
@@ -67,50 +68,78 @@ class VoiceCaptureEngine {
                     withContext(Dispatchers.IO) {
                         if (stopRequested.get()) return@withContext
                         val min = AudioRecord.getMinBufferSize(
-                            RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+                            RATE, AudioFormat.CHANNEL_IN_MONO,
+                            AudioFormat.ENCODING_PCM_16BIT
                         )
-                        require(min > 0) { "อุปกรณ์ไม่รองรับการบันทึกเสียง 16 kHz" }
-                        val readSize = max(4096, min / 2)
+                        require(min > 0) { "โทรศัพท์ไม่รองรับการบันทึก 16 kHz" }
+                        val readSize = max(2048, min / 2)
                         val audio = AudioRecord(
-                            MediaRecorder.AudioSource.MIC,
-                            RATE,
+                            MediaRecorder.AudioSource.MIC, RATE,
                             AudioFormat.CHANNEL_IN_MONO,
-                            AudioFormat.ENCODING_PCM_16BIT,
-                            readSize * 2
+                            AudioFormat.ENCODING_PCM_16BIT, readSize * 2
                         )
                         if (audio.state != AudioRecord.STATE_INITIALIZED) {
                             audio.release()
-                            error("เปิดไมโครโฟนไม่สำเร็จ")
+                            error("ไมโครโฟนไม่พร้อม กรุณาตรวจสอบสิทธิ์การใช้งาน")
                         }
                         recorder = audio
-                        val readBuffer = ShortArray(readSize)
-                        val window = FloatArray(RATE * SECONDS)
+                        val buffer = ShortArray(readSize)
+                        val window = FloatArray(SAMPLES_PER_WINDOW)
                         var filled = 0
-                        var amplitude = 0.0
+                        var sumSquares = 0.0
+                        var totalSamples = 0L
+                        var lastSecond = 0
+                        var part = 0
+                        var dropped = 0
+                        fun offerChunk(frame: FloatArray, rms: Double) {
+                            // Ignore truly silent windows, but do not throw away soft speech.
+                            if (rms < 0.0015) return
+                            part++
+                            val item = part to frame
+                            if (pending.trySend(item).isFailure) {
+                                // Retain the currently decoding frame and the newest input.
+                                pending.tryReceive()
+                                if (pending.trySend(item).isFailure) {
+                                    onWarning("ระบบถอดเสียงไม่ทัน เสียงบางช่วงอาจหายไป")
+                                }
+                                dropped++
+                                if (dropped == 1 || dropped % 3 == 0) {
+                                    onWarning("เครื่องถอดเสียงไม่ทัน ข้ามเสียงที่ค้างแล้ว ${dropped} ช่วง")
+                                }
+                            }
+                        }
                         try {
                             if (stopRequested.get()) return@withContext
                             audio.startRecording()
                             onReady()
                             while (currentCoroutineContext().isActive && !stopRequested.get()) {
-                                val read = audio.read(readBuffer, 0, readBuffer.size)
-                                if (read < 0) {
+                                val count = audio.read(buffer, 0, buffer.size)
+                                if (count < 0) {
                                     if (stopRequested.get()) break
-                                    error("ไม่สามารถรับเสียงจากไมโครโฟนได้ ($read)")
+                                    error("ไมโครโฟนอ่านเสียงไม่สำเร็จ ($count)")
                                 }
-                                if (read == 0) continue
-                                for (n in 0 until read) {
-                                    val sample = readBuffer[n].toFloat() / 32768f
+                                if (count == 0) continue
+                                for (index in 0 until count) {
+                                    val sample = buffer[index].toFloat() / 32768f
                                     window[filled++] = sample
-                                    amplitude += abs(sample.toDouble())
-                                    if (filled == window.size) {
-                                        emitIfSpeech(window.copyOf(), amplitude / filled, queue, onWarning)
+                                    sumSquares += sample.toDouble() * sample
+                                    totalSamples++
+                                    val second = (totalSamples / RATE).toInt()
+                                    if (second > lastSecond) {
+                                        lastSecond = second
+                                        val level = (sqrt(sumSquares / filled) * 1000).toInt().coerceIn(0, 100)
+                                        onCapture(second, level)
+                                    }
+                                    if (filled == SAMPLES_PER_WINDOW) {
+                                        offerChunk(window.copyOf(), sqrt(sumSquares / filled))
                                         filled = 0
-                                        amplitude = 0.0
+                                        sumSquares = 0.0
                                     }
                                 }
                             }
-                            if (filled >= RATE) {
-                                emitIfSpeech(window.copyOf(filled), amplitude / filled, queue, onWarning)
+                            // Keep final partial speech; the decoder sees at most one queued frame.
+                            if (filled >= RATE / 2) {
+                                offerChunk(window.copyOf(filled), sqrt(sumSquares / filled))
                             }
                         } finally {
                             recorder = null
@@ -119,34 +148,22 @@ class VoiceCaptureEngine {
                         }
                     }
                 } finally {
-                    queue.close()
-                    // Do not release the native model while a chunk is being transcribed.
-                    withContext(NonCancellable) { processor.join() }
+                    pending.close()
+                    // Native model must outlive the decoder. OnStop is visible in UI,
+                    // and only at most one queued frame remains.
+                    withContext(NonCancellable) { decoder.join() }
                 }
             }
         } finally {
-            if (nativeContext != 0L) {
-                withContext(NonCancellable + Dispatchers.Default) {
-                    WhisperBridge.unload(nativeContext)
-                }
+            withContext(NonCancellable + Dispatchers.Default) {
+                WhisperBridge.unload(nativeContext)
             }
-        }
-    }
-
-    private fun emitIfSpeech(
-        samples: FloatArray,
-        meanAmplitude: Double,
-        queue: Channel<FloatArray>,
-        onWarning: (String) -> Unit
-    ) {
-        if (meanAmplitude < 0.004) return
-        if (queue.trySend(samples).isFailure) {
-            onWarning("เครื่องถอดเสียงไม่ทัน จึงข้ามเสียงบางช่วง ลองพูดช้าลงหรือใช้โทรศัพท์ที่เร็วขึ้น")
         }
     }
 
     companion object {
         const val RATE = 16_000
-        const val SECONDS = 7
+        const val WINDOW_SECONDS = 3
+        const val SAMPLES_PER_WINDOW = RATE * WINDOW_SECONDS
     }
 }
