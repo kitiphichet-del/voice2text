@@ -68,6 +68,7 @@ class InterpreterViewModel(application: Application) : AndroidViewModel(applicat
         invalidateWork()
         mutableState.update {
             it.copy(inputMode = mode, source = "", translation = "", translating = false,
+                voicePreparing = false, listening = false, voiceProcessing = false,
                 status = if (mode == InputMode.VOICE)
                     "โหลดโมเดลเสียงและโมเดลแปลภาษาก่อนเริ่มใช้ไมโครโฟน"
                 else "พิมพ์ข้อความภาษาไทยหรือจีนเพื่อเริ่มแปล")
@@ -167,7 +168,7 @@ class InterpreterViewModel(application: Application) : AndroidViewModel(applicat
 
     fun startVoice() {
         val snapshot = mutableState.value
-        if (snapshot.inputMode != InputMode.VOICE ||
+        if (snapshot.inputMode != InputMode.VOICE || voiceJob?.isActive == true ||
             snapshot.voicePreparing || snapshot.listening || snapshot.voiceProcessing) return
         if (!model.isReady()) {
             mutableState.update { it.copy(status = "กรุณาดาวน์โหลดโมเดลเสียงให้ครบก่อน (ครั้งเดียว)") }
@@ -190,6 +191,7 @@ class InterpreterViewModel(application: Application) : AndroidViewModel(applicat
                 source = "", translation = "", translating = false,
                 status = "กำลังเปิดโมเดล Whisper บนเครื่อง…")
         }
+        voice.prepareStart()
         voiceJob = viewModelScope.launch {
             try {
                 voice.listen(
