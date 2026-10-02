@@ -36,6 +36,10 @@ data class InterpreterState(
     val voicePreparing: Boolean = false,
     val listening: Boolean = false,
     val voiceProcessing: Boolean = false,
+    val capturedSeconds: Int = 0,
+    val processedSegments: Int = 0,
+    val processingSegment: Int = 0,
+    val audioLevel: Int = 0,
     val status: String = "พิมพ์ข้อความหรือเลือกโหมดเสียงเพื่อเริ่มแปล",
     val lastUsed: Direction? = null
 )
@@ -58,6 +62,7 @@ class InterpreterViewModel(application: Application) : AndroidViewModel(applicat
     private var voiceJob: Job? = null
     private var requestNumber = 0L
     private var voiceSession = 0L
+    private var finishingMonitor: Job? = null
 
     fun setInputMode(mode: InputMode) {
         if (mutableState.value.inputMode == mode) return
@@ -85,7 +90,7 @@ class InterpreterViewModel(application: Application) : AndroidViewModel(applicat
                 status = if (input.isBlank()) "รอข้อความล่าสุด…" else "กำลังรับข้อความล่าสุด…"
             )
         }
-        if (input.isNotBlank()) scheduleTranslation(850)
+        if (input.isNotBlank()) scheduleTranslation(if (mutableState.value.inputMode == InputMode.VOICE) 0 else 850)
     }
 
     fun setDirection(direction: Direction) {
@@ -139,7 +144,7 @@ class InterpreterViewModel(application: Application) : AndroidViewModel(applicat
         speechDownloadWork = viewModelScope.launch {
             mutableState.update {
                 it.copy(speechDownloading = true, speechProgress = 0,
-                    status = "ดาวน์โหลดโมเดลเสียงหลายภาษา (~60 MB) ใช้อินเทอร์เน็ตเฉพาะครั้งแรก…")
+                    status = "กำลังดาวน์โหลดโมเดลเสียงรุ่นเร็ว Tiny (~32 MB) ครั้งแรก…")
             }
             try {
                 model.download { progress ->
@@ -189,7 +194,9 @@ class InterpreterViewModel(application: Application) : AndroidViewModel(applicat
         mutableState.update {
             it.copy(voicePreparing = true, listening = false, voiceProcessing = false,
                 source = "", translation = "", translating = false,
-                status = "กำลังเปิดโมเดล Whisper บนเครื่อง…")
+                capturedSeconds = 0, processedSegments = 0,
+                processingSegment = 0, audioLevel = 0,
+                status = "กำลังเปิดโมเดล Whisper Tiny บนเครื่อง…")
         }
         voice.prepareStart()
         voiceJob = viewModelScope.launch {
@@ -206,7 +213,18 @@ class InterpreterViewModel(application: Application) : AndroidViewModel(applicat
                     onReady = {
                         if (session == voiceSession) mutableState.update {
                             it.copy(voicePreparing = false, listening = true, voiceProcessing = false,
-                                status = "กำลังฟัง… ระบบจะแปลเสียงเป็นช่วงประมาณ 7 วินาที")
+                                status = "กำลังฟังและถอดเสียงเป็นช่วง 3 วินาที…")
+                        }
+                    },
+                    onCapture = { seconds, level ->
+                        if (session == voiceSession) mutableState.update {
+                            it.copy(capturedSeconds = seconds, audioLevel = level)
+                        }
+                    },
+                    onProcessing = { number ->
+                        if (session == voiceSession) mutableState.update {
+                            it.copy(processingSegment = number,
+                                status = "กำลังถอดเสียงช่วงที่ $number บนเครื่อง…")
                         }
                     },
                     onTranscript = { recognized ->
@@ -214,12 +232,24 @@ class InterpreterViewModel(application: Application) : AndroidViewModel(applicat
                             updateInput(recognized)
                         }
                     },
+                    onDecoded = { number, recognized ->
+                        if (session == voiceSession) mutableState.update {
+                            it.copy(
+                                processedSegments = it.processedSegments + 1,
+                                status = if (recognized)
+                                    "ถอดเสียงช่วงที่ $number ได้แล้ว กำลังแปล…"
+                                else "ยังจับคำพูดไม่ได้ในช่วงที่ $number ลองเข้าใกล้ไมโครโฟน"
+                            )
+                        }
+                    },
                     onWarning = { message ->
                         if (session == voiceSession) mutableState.update { it.copy(status = message) }
                     }
                 )
                 if (session == voiceSession) mutableState.update {
-                    it.copy(status = "หยุดฟังแล้ว ประมวลผลเสียงที่เหลือเสร็จแล้ว")
+                    it.copy(status = if (it.source.isBlank())
+                        "หยุดฟังแล้ว แต่ยังถอดข้อความไม่ได้ กรุณาลองพูดให้ดังขึ้นหรือบังคับภาษาต้นฉบับ"
+                    else "หยุดฟังแล้ว ประมวลผลเสียงทั้งหมดเสร็จแล้ว")
                 }
             } catch (cancel: CancellationException) {
                 throw cancel
@@ -228,6 +258,7 @@ class InterpreterViewModel(application: Application) : AndroidViewModel(applicat
                     it.copy(status = "โหมดเสียงขัดข้อง: ${error.message ?: "โปรดตรวจสอบสิทธิ์ไมโครโฟน"}")
                 }
             } finally {
+                finishingMonitor?.cancel()
                 if (session == voiceSession) mutableState.update {
                     it.copy(voicePreparing = false, listening = false, voiceProcessing = false)
                 }
@@ -240,7 +271,17 @@ class InterpreterViewModel(application: Application) : AndroidViewModel(applicat
         voice.requestStop()
         mutableState.update {
             it.copy(listening = false, voicePreparing = false, voiceProcessing = true,
-                status = "หยุดรับเสียงแล้ว กำลังถอดเสียงช่วงสุดท้าย…")
+                status = "หยุดรับเสียงแล้ว กำลังจบช่วงที่ถอดเสียงอยู่…")
+        }
+        finishingMonitor?.cancel()
+        finishingMonitor = viewModelScope.launch {
+            delay(8_000)
+            if (voiceJob?.isActive == true && mutableState.value.voiceProcessing) {
+                mutableState.update {
+                    it.copy(status = "เครื่องกำลังถอดเสียงช้ากว่าปกติ (รอได้หรือเปลี่ยนไปโหมดข้อความ) " +
+                        "ระบบไม่ส่งเสียงขึ้น Cloud")
+                }
+            }
         }
     }
 
@@ -298,6 +339,7 @@ class InterpreterViewModel(application: Application) : AndroidViewModel(applicat
         voiceSession++
         voice.requestStop()
         voiceJob?.cancel()
+        finishingMonitor?.cancel()
         invalidateWork()
         downloadWork?.cancel()
         speechDownloadWork?.cancel()

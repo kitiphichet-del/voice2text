@@ -229,7 +229,7 @@ private fun InterpreterScreen(
                             }
                         }
                         Text(
-                            "Whisper ประมวลผลเสียงเป็นช่วงประมาณ 7 วินาที " +
+                            "Whisper Tiny ประมวลผลเสียงเป็นช่วงประมาณ 3 วินาที " +
                                 "เสียงและคำแปลไม่ถูกส่งไปยังบริการ Cloud",
                             color = Muted, fontSize = 13.sp, lineHeight = 19.sp
                         )
@@ -261,6 +261,13 @@ private fun InterpreterScreen(
                             }
                         }
 
+                        Text(
+                            "รับเสียง ${state.capturedSeconds} วินาที • ถอดแล้ว ${state.processedSegments} ช่วง" +
+                                if (state.processingSegment > state.processedSegments)
+                                    " • กำลังถอดช่วงที่ ${state.processingSegment}"
+                                else "",
+                            color = Indigo, fontSize = 13.sp, fontWeight = FontWeight.SemiBold
+                        )
                         Text("ข้อความเสียงล่าสุด", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                         SelectionContainer {
                             Text(
@@ -352,13 +359,13 @@ private fun InterpreterScreen(
                         !state.voicePreparing && !state.voiceProcessing,
                     modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)
                 ) {
-                    Text(if (state.speechReady) "✓  โมเดลเสียง Whisper พร้อมใช้งาน"
+                    Text(if (state.speechReady) "✓  โมเดลเสียง Whisper Tiny พร้อมใช้งาน"
                         else if (state.speechDownloading)
                             "ดาวน์โหลดโมเดลเสียง ${state.speechProgress}%"
-                        else "2. ดาวน์โหลดโมเดลเสียง Whisper (~60 MB)")
+                        else "2. ดาวน์โหลดโมเดลเสียงรุ่นเร็ว Whisper Tiny (~32 MB)")
                 }
                 Text(
-                    "โมเดลเสียง Base หลายภาษา • ดาวน์โหลดครั้งแรกด้วยอินเทอร์เน็ต " +
+                    "โมเดลเสียง Tiny หลายภาษา • ต้องดาวน์โหลดรุ่นเร็วครั้งแรกด้วยอินเทอร์เน็ต " +
                         "• หลังดาวน์โหลดครบ เปิดโหมดเครื่องบินได้ " +
                         "• ไม่บันทึกไฟล์เสียง " +
                         "• เมื่อออกจากแอปหรือปิดจอจะหยุดรับเสียง",
@@ -373,7 +380,7 @@ private fun InterpreterScreen(
                 )
             }
             Text(
-                "V 1.1.0  •  Android 8.0+  •  Offline voice",
+                "V 1.2.0  •  Android 8.0+  •  Offline live chunks",
                 fontSize = 11.sp, color = Muted,
                 modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center
             )

@@ -42,6 +42,7 @@ class VoiceCaptureEngine {
         language: () -> String,
         onReady: () -> Unit,
         onTranscript: (String) -> Unit,
+        onDecoded: (Int, Boolean) -> Unit,
         onWarning: (String) -> Unit
     ) {
         if (stopRequested.get()) return
@@ -59,6 +60,7 @@ class VoiceCaptureEngine {
                     for (chunk in queue) {
                         val result = WhisperBridge.transcribe(handle, chunk, language()).trim()
                         if (result.isNotEmpty()) onTranscript(result)
+                        onDecoded(number, result.isNotEmpty())
                     }
                 }
                 try {
