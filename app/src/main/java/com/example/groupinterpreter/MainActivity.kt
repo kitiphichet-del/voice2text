@@ -1,8 +1,12 @@
 package com.example.groupinterpreter
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -19,9 +23,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -41,12 +45,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.example.groupinterpreter.core.Direction
+import com.example.groupinterpreter.presentation.InputMode
 import com.example.groupinterpreter.presentation.InterpreterState
 import com.example.groupinterpreter.presentation.InterpreterViewModel
 
@@ -64,11 +71,8 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme(
                 colorScheme = lightColorScheme(
-                    primary = Indigo,
-                    onPrimary = Color.White,
-                    background = Canvas,
-                    surface = Color.White,
-                    onSurface = DeepInk
+                    primary = Indigo, onPrimary = Color.White,
+                    background = Canvas, surface = Color.White, onSurface = DeepInk
                 )
             ) {
                 val state by interpreter.state.collectAsState()
@@ -76,12 +80,24 @@ class MainActivity : ComponentActivity() {
                     state = state,
                     onText = interpreter::updateInput,
                     onMode = interpreter::setDirection,
+                    onTab = interpreter::setInputMode,
                     onTranslate = interpreter::translateNow,
                     onClear = interpreter::clear,
-                    onPrepare = interpreter::prepareModels
+                    onPrepareTranslation = interpreter::prepareModels,
+                    onPrepareSpeech = interpreter::prepareSpeechModel,
+                    onVoiceStart = interpreter::startVoice,
+                    onVoiceStop = interpreter::stopVoice,
+                    onPermissionDenied = interpreter::permissionDenied
                 )
             }
         }
+    }
+
+    // Voice stays alive through rotation (ViewModel retained), but stops on backgrounding.
+    // Background mic capture would require a foreground service and notification.
+    override fun onStop() {
+        super.onStop()
+        if (!isChangingConfigurations) interpreter.stopVoice()
     }
 }
 
@@ -90,16 +106,25 @@ private fun InterpreterScreen(
     state: InterpreterState,
     onText: (String) -> Unit,
     onMode: (Direction) -> Unit,
+    onTab: (InputMode) -> Unit,
     onTranslate: () -> Unit,
     onClear: () -> Unit,
-    onPrepare: () -> Unit
+    onPrepareTranslation: () -> Unit,
+    onPrepareSpeech: () -> Unit,
+    onVoiceStart: () -> Unit,
+    onVoiceStop: () -> Unit,
+    onPermissionDenied: () -> Unit
 ) {
     val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    val micPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) onVoiceStart() else onPermissionDenied()
+    }
     Surface(modifier = Modifier.fillMaxSize(), color = Canvas) {
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
+            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())
                 .padding(horizontal = 18.dp, vertical = 24.dp),
             verticalArrangement = Arrangement.spacedBy(15.dp)
         ) {
@@ -108,26 +133,40 @@ private fun InterpreterScreen(
                     Text(
                         "文 ⇄ ก",
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                        color = Color.White,
-                        fontSize = 21.sp,
-                        fontWeight = FontWeight.Bold
+                        color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Bold
                     )
                 }
                 Spacer(Modifier.width(13.dp))
                 Column {
                     Text("ล่ามไทย–จีน", fontSize = 25.sp, color = DeepInk, fontWeight = FontWeight.Bold)
-                    Text("THAI  ↔  简体中文  •  ข้อความเท่านั้น", fontSize = 12.sp, color = Muted)
+                    Text("THAI  ↔  简体中文  •  ข้อความและเสียง", fontSize = 12.sp, color = Muted)
                 }
             }
 
             Surface(color = Sky, shape = RoundedCornerShape(14.dp)) {
                 Text(
-                    "สำหรับการสนทนาแบบกลุ่ม · ไม่ตอบคำถามแทนผู้พูด · แสดงคำแปลล่าสุดเท่านั้น",
-                    modifier = Modifier.padding(14.dp),
-                    fontSize = 13.sp,
-                    lineHeight = 19.sp,
-                    color = Indigo
+                    "ทำงานบนเครื่องหลังดาวน์โหลดโมเดล • ไม่ส่งเสียงไปยังเซิร์ฟเวอร์ • ไม่ตอบคำถามแทนผู้พูด",
+                    modifier = Modifier.padding(14.dp), fontSize = 13.sp,
+                    lineHeight = 19.sp, color = Indigo
                 )
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (state.inputMode == InputMode.TEXT) {
+                    Button(onClick = { onTab(InputMode.TEXT) }, modifier = Modifier.weight(1f)) {
+                        Text("⌨  โหมดข้อความ")
+                    }
+                    OutlinedButton(onClick = { onTab(InputMode.VOICE) }, modifier = Modifier.weight(1f)) {
+                        Text("🎤  โหมดเสียง")
+                    }
+                } else {
+                    OutlinedButton(onClick = { onTab(InputMode.TEXT) }, modifier = Modifier.weight(1f)) {
+                        Text("⌨  โหมดข้อความ")
+                    }
+                    Button(onClick = { onTab(InputMode.VOICE) }, modifier = Modifier.weight(1f)) {
+                        Text("🎤  โหมดเสียง")
+                    }
+                }
             }
 
             Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
@@ -138,30 +177,104 @@ private fun InterpreterScreen(
                         DirectionChoice("ไทย → 中文", Direction.TH_TO_ZH, state.direction, onMode, Modifier.weight(1.2f))
                         DirectionChoice("中文 → ไทย", Direction.ZH_TO_TH, state.direction, onMode, Modifier.weight(1.2f))
                     }
+                    if (state.inputMode == InputMode.VOICE) {
+                        Text(
+                            "อัตโนมัติอาจตรวจจับภาษาคลาดเคลื่อนเมื่อเสียงสั้นหรือพูดสลับภาษา " +
+                                "เลือกทิศทางเองเพื่อบังคับภาษาเสียงต้นฉบับได้",
+                            color = Muted, fontSize = 12.sp, lineHeight = 18.sp
+                        )
+                    }
                 }
             }
 
-            Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
-                Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("01  ข้อความต้นฉบับ", fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                        TextButton(onClick = onClear, enabled = state.source.isNotEmpty()) { Text("ล้างข้อความ") }
+            if (state.inputMode == InputMode.TEXT) {
+                Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("01  ข้อความต้นฉบับ", fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                            TextButton(onClick = onClear, enabled = state.source.isNotEmpty()) {
+                                Text("ล้างข้อความ")
+                            }
+                        }
+                        OutlinedTextField(
+                            value = state.source, onValueChange = onText,
+                            modifier = Modifier.fillMaxWidth().height(175.dp),
+                            placeholder = { Text("พิมพ์หรือวางข้อความ…\nเช่น คุณหวัง: 下午两点出发。") },
+                            singleLine = false, shape = RoundedCornerShape(12.dp)
+                        )
+                        Text("หยุดพิมพ์ประมาณ 1 วินาที ระบบจะแปลให้เอง", fontSize = 12.sp, color = Muted)
+                        Button(
+                            onClick = onTranslate,
+                            enabled = !state.translating && state.source.isNotBlank(),
+                            modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(11.dp)
+                        ) { Text("แปลข้อความบนเครื่อง", modifier = Modifier.padding(vertical = 5.dp)) }
                     }
-                    OutlinedTextField(
-                        value = state.source,
-                        onValueChange = onText,
-                        modifier = Modifier.fillMaxWidth().height(175.dp),
-                        placeholder = { Text("พิมพ์หรือวางข้อความ…\nเช่น คุณหวัง: 下午两点出发。") },
-                        singleLine = false,
-                        shape = RoundedCornerShape(12.dp)
-                    )
-                    Text("หยุดพิมพ์ประมาณ 1 วินาที ระบบจะเริ่มแปลให้เอง", fontSize = 12.sp, color = Muted)
-                    Button(
-                        onClick = onTranslate,
-                        enabled = !state.translating && state.source.isNotBlank(),
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(11.dp)
-                    ) { Text("แปลด้วย Google Translate", modifier = Modifier.padding(vertical = 5.dp)) }
+                }
+            } else {
+                Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("01  ฟังเสียงสด", fontSize = 16.sp, fontWeight = FontWeight.Bold,
+                                modifier = Modifier.weight(1f))
+                            if (state.listening) {
+                                Text("● REC", fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp, color = Color(0xFFD42D42))
+                            }
+                        }
+                        Text(
+                            "Whisper ประมวลผลเสียงเป็นช่วงประมาณ 7 วินาที " +
+                                "เสียงและคำแปลไม่ถูกส่งไปยังบริการ Cloud",
+                            color = Muted, fontSize = 13.sp, lineHeight = 19.sp
+                        )
+                        if (state.listening) {
+                            Button(
+                                onClick = onVoiceStop, modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(11.dp)
+                            ) { Text("■  หยุดฟังและถอดเสียงช่วงสุดท้าย") }
+                        } else {
+                            Button(
+                                onClick = {
+                                    if (ContextCompat.checkSelfPermission(
+                                            context, Manifest.permission.RECORD_AUDIO
+                                        ) == PackageManager.PERMISSION_GRANTED) {
+                                        onVoiceStart()
+                                    } else {
+                                        micPermission.launch(Manifest.permission.RECORD_AUDIO)
+                                    }
+                                },
+                                enabled = state.speechReady && state.prepared &&
+                                    !state.voicePreparing && !state.voiceProcessing,
+                                modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(11.dp)
+                            ) {
+                                Text(
+                                    if (state.voicePreparing) "กำลังโหลดโมเดลเสียง…"
+                                    else if (state.voiceProcessing) "กำลังถอดเสียงช่วงสุดท้าย…"
+                                    else "🎤  เริ่มฟังและแปลแบบออฟไลน์"
+                                )
+                            }
+                        }
+
+                        Text("ข้อความเสียงล่าสุด", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        SelectionContainer {
+                            Text(
+                                state.source.ifBlank { "ข้อความที่ฟังได้จะปรากฏตรงนี้" },
+                                modifier = Modifier.fillMaxWidth()
+                                    .background(Canvas, RoundedCornerShape(11.dp))
+                                    .padding(14.dp),
+                                color = if (state.source.isBlank()) Muted else DeepInk,
+                                fontSize = 17.sp, lineHeight = 25.sp
+                            )
+                        }
+                        OutlinedButton(onClick = onClear, enabled = state.source.isNotBlank() &&
+                            !state.listening && !state.voiceProcessing) { Text("ล้างข้อความล่าสุด") }
+                    }
                 }
             }
 
@@ -170,9 +283,13 @@ private fun InterpreterScreen(
                 border = BorderStroke(1.dp, Color(0xFFD7E2F0)),
                 shape = RoundedCornerShape(18.dp)
             ) {
-                Column(modifier = Modifier.fillMaxWidth().padding(17.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(17.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("02  คำแปลล่าสุด", fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                        Text("02  คำแปลล่าสุด", fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                         OutlinedButton(
                             onClick = { clipboard.setText(AnnotatedString(state.translation)) },
                             enabled = state.translation.isNotBlank()
@@ -180,58 +297,85 @@ private fun InterpreterScreen(
                     }
                     HorizontalDivider(color = Color(0xFFEDF1F6))
                     Box(
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 160.dp).background(Canvas, RoundedCornerShape(12.dp))
-                            .padding(16.dp),
-                        contentAlignment = if (state.translation.isBlank()) Alignment.Center else Alignment.TopStart
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 160.dp)
+                            .background(Canvas, RoundedCornerShape(12.dp)).padding(16.dp),
+                        contentAlignment = if (state.translation.isBlank()) Alignment.Center
+                            else Alignment.TopStart
                     ) {
                         if (state.translating && state.translation.isBlank()) {
                             CircularProgressIndicator(color = Indigo)
                         } else if (state.translation.isNotBlank()) {
                             SelectionContainer {
-                                Text(state.translation, color = DeepInk, fontSize = 20.sp, lineHeight = 31.sp)
+                                Text(state.translation, color = DeepInk,
+                                    fontSize = 20.sp, lineHeight = 31.sp)
                             }
                         } else {
-                            Text("ข้อความที่แปลแล้วจะปรากฏตรงนี้", fontSize = 14.sp, color = Muted, textAlign = TextAlign.Center)
+                            Text(
+                                "คำแปลล่าสุดจะปรากฏตรงนี้",
+                                color = Muted, fontSize = 14.sp, textAlign = TextAlign.Center
+                            )
                         }
                     }
-                    // Attribution is separate from translated content, as required by Google.
                     Text("Powered by Google Translate", fontSize = 11.sp, color = Muted)
                 }
             }
 
             Surface(color = Color(0xFFEEF3F8), shape = RoundedCornerShape(13.dp)) {
-                Row(modifier = Modifier.fillMaxWidth().padding(13.dp), verticalAlignment = Alignment.CenterVertically) {
-                    if (state.translating || state.downloading) {
-                        CircularProgressIndicator(modifier = Modifier.width(17.dp).height(17.dp), strokeWidth = 2.dp)
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(13.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (state.translating || state.downloading || state.speechDownloading ||
+                        state.voicePreparing || state.voiceProcessing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.width(17.dp).height(17.dp), strokeWidth = 2.dp
+                        )
                         Spacer(Modifier.width(9.dp))
                     }
-                    Text(state.status, modifier = Modifier.weight(1f), fontSize = 12.sp, color = DeepInk, lineHeight = 19.sp)
+                    Text(state.status, modifier = Modifier.weight(1f),
+                        fontSize = 12.sp, color = DeepInk, lineHeight = 19.sp)
                 }
             }
 
             OutlinedButton(
-                onClick = onPrepare,
-                enabled = !state.downloading,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp)
+                onClick = onPrepareTranslation,
+                enabled = !state.downloading && !state.listening,
+                modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)
             ) {
-                Text(if (state.prepared) "ตรวจสอบ / ดาวน์โหลดโมเดลอีกครั้ง (Wi-Fi)" else "เตรียมโมเดลภาษาไทย–จีน (Wi-Fi)")
+                Text(if (state.prepared) "✓  ตรวจสอบโมเดลแปลภาษา (Wi-Fi)"
+                    else "1. ดาวน์โหลดโมเดลแปลภาษาไทย–จีน (Wi-Fi)")
+            }
+            if (state.inputMode == InputMode.VOICE) {
+                OutlinedButton(
+                    onClick = onPrepareSpeech,
+                    enabled = !state.speechDownloading && !state.listening &&
+                        !state.voicePreparing && !state.voiceProcessing,
+                    modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text(if (state.speechReady) "✓  โมเดลเสียง Whisper พร้อมใช้งาน"
+                        else if (state.speechDownloading)
+                            "ดาวน์โหลดโมเดลเสียง ${state.speechProgress}%"
+                        else "2. ดาวน์โหลดโมเดลเสียง Whisper (~60 MB)")
+                }
+                Text(
+                    "โมเดลเสียง Base หลายภาษา • ดาวน์โหลดครั้งแรกด้วยอินเทอร์เน็ต " +
+                        "• หลังดาวน์โหลดครบ เปิดโหมดเครื่องบินได้ " +
+                        "• ไม่บันทึกไฟล์เสียง " +
+                        "• เมื่อออกจากแอปหรือปิดจอจะหยุดรับเสียง",
+                    fontSize = 11.sp, lineHeight = 18.sp, color = Muted,
+                    textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
+                )
+            } else {
+                Text(
+                    "โมเดลที่ดาวน์โหลดแล้วแปลบนเครื่องได้ • ไม่มีการส่งข้อความไปยังแชตบอต",
+                    fontSize = 11.sp, color = Muted,
+                    textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
+                )
             }
             Text(
-                "หลังจากดาวน์โหลดโมเดลแล้ว แปลบนเครื่องได้โดยไม่ส่งข้อความไปยังเซิร์ฟเวอร์ " +
-                    "• ไม่ใช้ไมโครโฟน • ไม่มีประวัติสนทนาที่จัดเก็บโดยแอป",
-                fontSize = 11.sp,
-                lineHeight = 18.sp,
-                color = Muted,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
-            Text(
-                "V 1.0.0  •  Android 8.0+",
-                fontSize = 11.sp,
-                color = Muted,
-                modifier = Modifier.fillMaxWidth(),
-                textAlign = TextAlign.Center
+                "V 1.1.0  •  Android 8.0+  •  Offline voice",
+                fontSize = 11.sp, color = Muted,
+                modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center
             )
         }
     }
@@ -253,12 +397,10 @@ private fun DirectionChoice(
         border = BorderStroke(1.dp, if (selected) Indigo else Color(0xFFDDE5EF))
     ) {
         Text(
-            label,
-            fontSize = 11.sp,
+            label, fontSize = 11.sp,
             fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
             color = if (selected) Indigo else DeepInk,
-            textAlign = TextAlign.Center,
-            maxLines = 1,
+            textAlign = TextAlign.Center, maxLines = 1,
             modifier = Modifier.padding(vertical = 12.dp, horizontal = 2.dp)
         )
     }

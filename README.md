@@ -1,60 +1,56 @@
-# ล่ามไทย–จีน / Thai–Chinese Group Interpreter
+# Thai–Chinese Group Interpreter / ล่ามไทย–จีน V 1.1.0
 
-**สถานะ: Android Studio source project / not a precompiled APK.**
-
-แอปแปล **ข้อความ** ภาษาไทย ↔ ภาษาจีน โดยแสดงเฉพาะคำแปลล่าสุดในช่องผลลัพธ์ ไม่ตอบคำถามและไม่แสดงความคิดเห็น ไม่ต้องใช้ไมโครโฟน ไม่เก็บประวัติการสนทนา ชื่อผู้พูดก่อนเครื่องหมาย `:` หรือ `：` จะถูกคงไว้ตามที่ผู้พูดพิมพ์
+Offline-first Android text + microphone translation app: Thai ↔ Chinese.
+**All speech-to-text inference and translation run on the Android phone.** There is no cloud speech-recognition API, no upload of microphone audio, no speech playback, and no speaker identification.
 
 ## Features
 
-- Auto direction: count Thai and Han script characters; if tied/absent fall back to ML Kit language ID. If still inconclusive, request user to pick an explicit direction.
-- Thai → Chinese, Chinese → Thai manual direction override.
-- Debounced automatic translation (850 ms) + explicit Translate button.
-- Only latest input output shown: changes immediately clear previous result; request generation number rejects late results from old requests.
-- ML Kit on-device translation. Download both language models via Wi-Fi button. Downloads require internet once; already-downloaded models can be used offline. For manual translate without predownload, ML Kit may download on mobile data: prefer using the Wi-Fi preparation button first.
-- Speaker prefix up to 32 characters (letters / spaces / some punctuation, no digits) is preserved exactly and not translated. This doesn't identify speakers automatically.
-- Select-to-copy and Copy button. ViewModel retains current state after screen rotation.
-- Version and progress/error status at the bottom.
-- No ads, login, voice, cloud chat, Firebase, or API keys.
+- **Text mode:** type or paste Thai / Chinese, automatic or manual translation direction; only most recent translation shown.
+- **Voice mode:** tap Start, Android microphone records mono 16 kHz audio, process in 7-second chunks using **Whisper.cpp v1.9.4** (native JNI, Android NDK/CMake), route Thai/Chinese transcription to **ML Kit on-device translation**. Press Stop to process final audio segment.
+- Voice language: Auto / force Thai / force Chinese. Use forced language when automatic recognition struggles with short utterances or switching speakers.
+- Pausing isn't implemented. Changing orientation retains the ViewModel and active recording. Leaving the app / screen off stops capture; this build **does not** include background recording or a foreground service.
+- No saved audio files or past transcript list. Buffering and transcription operate only in memory. UI displays last recognized segment and last translation.
+- Bounded ASR queue with a warning if phone CPU cannot keep up; slow phones may skip segments instead of losing control or exhausting memory.
+- Strict offline voice translation: when a required translation model is missing, show an error instead of silently using the network.
 
-## GitHub project
+## First launch / airplane mode
 
-Repository: https://github.com/kitiphichet-del/voice2text
+1. Use Wi-Fi to press **เตรียมโมเดลภาษาไทย–จีน** (ML Kit translation).
+2. Switch to Voice mode, press **ดาวน์โหลดโมเดลเสียง Whisper (~60 MB)**. The multilingual model is downloaded from Hugging Face, the official converted Whisper model repository, and validated against a pinned SHA-256.
+3. Grant the Android **RECORD_AUDIO** permission and tap **เริ่มฟัง**. No internet is needed after both model families have been installed and retained. Try Airplane Mode to verify this.
+4. An initial download is required once on each device. A major reinstall, clearing app data, or model deletion may require a new download.
+
+Speech model: `ggml-base-q5_1.bin` (multilingual model, **not** `base.en`); 59.7 MB, published by ggerganov/whisper.cpp; SHA-256:
+`422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898`.
+Download source:
+https://huggingface.co/ggerganov/whisper.cpp/blob/f281eb45af861ab5e5297d23694b7d46e090c02c/ggml-base-q5_1.bin
 
 ## Build APK
 
-1. Install **Android Studio** with **Android SDK 36**, SDK Build Tools, and **JDK 17+**; internet is required to retrieve Gradle dependencies on the *development machine*.
-2. Unzip this folder and open its root folder in Android Studio.
-3. This archive includes `gradle/wrapper/gradle-wrapper.properties` but **does not include a Gradle wrapper JAR**. If Android Studio requires one, install Gradle 8.13 locally, run `gradle wrapper --gradle-version 8.13`, and then click **Sync Project with Gradle Files**.
-4. Select **Build → Build Bundle(s) / APK(s) → Build APK(s)** or run `gradlew.bat assembleDebug` (Windows) / `./gradlew assembleDebug` (Linux/macOS) *after generating the Gradle wrapper*.
-5. The expected file after a successful build is `app/build/outputs/apk/debug/app-debug.apk` (do not confuse with this uncompiled source archive).
-6. **Build without Android Studio**: go to [GitHub Actions](https://github.com/kitiphichet-del/voice2text/actions/workflows/build-apk.yml), select **Build Thai-Chinese Android APK → Run workflow**. After a *successful* run, download the `ThaiChineseInterpreter-debug-apk` artifact and extract `app-debug.apk`. The workflow also runs Android JUnit unit tests before producing the APK.
-7. Install to Android 8.0+ (API 26+) and tap **เตรียมโมเดลภาษาไทย–จีน (Wi-Fi)** before airplane-mode use.
+GitHub Actions (build + unit tests): https://github.com/kitiphichet-del/voice2text/actions/workflows/build-apk.yml
 
-## Known limitations / non-promises
+The CI runner needs Android SDK API 36, NDK 27.2.12479018, CMake 3.22.1, Gradle 8.13 and JDK 17.
+The first **developer build** downloads pinned whisper.cpp sources using CMake FetchContent from:
+https://github.com/ggml-org/whisper.cpp/tree/v1.9.4.
+**Runtime offline speech does not depend on the build-time source retrieval.**
 
-- On-device ML Kit is a sentence translation model, **not an instruction-following LLM**. Therefore the app can enforce translation-only UI logic, but cannot guarantee polished professional context, nuanced honorifics, full consistency for speaker names, or exclusively Simplified characters in every result.
-- Mixed Thai/Chinese is routed based on the predominant script, and mixed passages are translated as a whole; individual fragments may not all be transformed as intended. Choose manual direction when automatic mode is not confident.
-- Only an explicitly typed leading speaker label is retained. Real diarization, transcription, multi-person voice, online meetings and TTS are **not in this text-only MVP**.
-- The language model files are **not bundled** with this source ZIP; the first run requires download.
-- Google ML Kit translates non-English pairs via English as an intermediary; review high-stakes or formal translations carefully.
-- Before public publication, review [ML Kit attribution rules](https://developers.google.com/ml-kit/language/translation/translation-terms) and Google's official attribution assets; the UI currently displays a plain-text "Powered by Google Translate" notice, not the approved graphic. Ensure branding meets current published requirements.
-- This project was assembled without a local Android SDK or Gradle distribution. Build status must be confirmed by a successful GitHub Actions run. Device testing must still be completed. Pure Kotlin routing tests and Android JUnit routing tests are included.
+Source project can also be opened in Android Studio with these SDK tools installed; the first Gradle sync/CMake configuration needs development-machine internet.
 
-## Pure Kotlin tests
+## Technical limitations
 
-With Java 17+ and Kotlin compiler installed:
+- Chunked near-real-time, **not true simultaneous word-level interpreting**. Processing latency depends on the device CPU and speech duration. Longer speech or heavy background usage can cause dropped chunks, indicated onscreen.
+- Whisper multilingual base is not perfect for Thai or Mandarin, overlapping voices, or code-switching in one window. Unclear results require correction. No speaker diarization.
+- Chinese simplified-only output **cannot be guaranteed** by the current text translation model.
+- ML Kit may route Thai ↔ Chinese via English and is designed primarily for casual/basic translations; verify nuance before formal meetings or important decisions.
+- No cloud AI, no automatic speech output, no audio streaming, and no ongoing background listening.
+- Microphone is intentionally stopped when the activity backgrounds; keeping capture running with screen off would require a dedicated microphone Foreground Service.
+- Model assets are downloaded **by the app once**, not bundled into this APK.
+- Device microphone, Android permission, download connection, CPU performance, and offline usability require **real-device testing** after a successful CI build.
 
-```bash
-kotlinc app/src/main/java/com/example/groupinterpreter/core/MessageRules.kt \
-    logic-tests/MessageRulesTest.kt -include-runtime -d logic-tests/tests.jar
-java -jar logic-tests/tests.jar
-```
+## Third-party software
 
-## Verified references
+- whisper.cpp (MIT): https://github.com/ggml-org/whisper.cpp
+- Whisper GGML model (MIT license on model card): https://huggingface.co/ggerganov/whisper.cpp
+- ML Kit on-device translation: https://developers.google.com/ml-kit/language/translation
 
-- [ML Kit Translate Android guide](https://developers.google.com/ml-kit/language/translation/android) (`com.google.mlkit:translate:17.0.3`)
-- [ML Kit Language Identification](https://developers.google.com/ml-kit/language/identification/android) (`com.google.mlkit:language-id:17.0.6`)
-- [Supported translation languages](https://developers.google.com/ml-kit/language/translation/translation-language-support) (Thai and Chinese)
-- [On-device translation limitations](https://developers.google.com/ml-kit/language/translation)
-
-Copyright: original sample code created for this request. External libraries follow their respective licenses and attribution rules.
+Check Google's current ML Kit translation attribution/branding requirements before release to an app store.

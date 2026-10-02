@@ -44,7 +44,7 @@ class OnDeviceTranslationEngine {
         }
     }
 
-    suspend fun translate(body: String, direction: Direction): String {
+    suspend fun translate(body: String, direction: Direction, offlineOnly: Boolean = false): String {
         val translator = when (direction) {
             Direction.TH_TO_ZH -> thaiToChinese
             Direction.ZH_TO_TH -> chineseToThai
@@ -52,7 +52,7 @@ class OnDeviceTranslationEngine {
         }
         // No network is needed once both language models have been downloaded.
         // For users who skipped predownload, try model download when translating.
-        translator.downloadModelIfNeeded().awaitTask()
+        if (!offlineOnly) translator.downloadModelIfNeeded().awaitTask()
         return translator.translate(body).awaitTask()
     }
 

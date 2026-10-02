@@ -1,10 +1,16 @@
 package com.example.groupinterpreter.presentation
 
-import androidx.lifecycle.ViewModel
+import android.Manifest
+import android.app.Application
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.groupinterpreter.core.Direction
 import com.example.groupinterpreter.core.MessageRules
 import com.example.groupinterpreter.data.OnDeviceTranslationEngine
+import com.example.groupinterpreter.voice.VoiceCaptureEngine
+import com.example.groupinterpreter.voice.WhisperModelManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -13,38 +19,72 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-/** App rules are enforced in code, not just a prompt. */
+enum class InputMode { TEXT, VOICE }
+
+/** Only the most recent message is displayed; old async translations are discarded. */
 data class InterpreterState(
     val source: String = "",
     val translation: String = "",
     val direction: Direction = Direction.AUTO,
+    val inputMode: InputMode = InputMode.TEXT,
     val translating: Boolean = false,
     val downloading: Boolean = false,
     val prepared: Boolean = false,
-    val status: String = "พิมพ์ข้อความภาษาไทยหรือจีนเพื่อเริ่มแปล",
+    val speechReady: Boolean = false,
+    val speechDownloading: Boolean = false,
+    val speechProgress: Int = 0,
+    val voicePreparing: Boolean = false,
+    val listening: Boolean = false,
+    val voiceProcessing: Boolean = false,
+    val status: String = "พิมพ์ข้อความหรือเลือกโหมดเสียงเพื่อเริ่มแปล",
     val lastUsed: Direction? = null
 )
 
-class InterpreterViewModel : ViewModel() {
-    private val engine = OnDeviceTranslationEngine()
-    private val mutableState = MutableStateFlow(InterpreterState())
+class InterpreterViewModel(application: Application) : AndroidViewModel(application) {
+    private val translator = OnDeviceTranslationEngine()
+    private val model = WhisperModelManager(application)
+    private val voice = VoiceCaptureEngine()
+    private val modelFlags = application.getSharedPreferences("offline_models", android.content.Context.MODE_PRIVATE)
+    private val mutableState = MutableStateFlow(
+        InterpreterState(
+            speechReady = model.isReady(),
+            prepared = modelFlags.getBoolean("translate_prepared", false)
+        )
+    )
     val state = mutableState.asStateFlow()
     private var work: Job? = null
     private var downloadWork: Job? = null
-    private var requestNumber: Long = 0L
+    private var speechDownloadWork: Job? = null
+    private var voiceJob: Job? = null
+    private var requestNumber = 0L
+    private var voiceSession = 0L
+
+    fun setInputMode(mode: InputMode) {
+        if (mutableState.value.inputMode == mode) return
+        if (mode == InputMode.TEXT) {
+            voiceSession++ // Pending voice transcripts must not appear on the text tab.
+            stopVoice()
+        }
+        invalidateWork()
+        mutableState.update {
+            it.copy(inputMode = mode, source = "", translation = "", translating = false,
+                status = if (mode == InputMode.VOICE)
+                    "โหลดโมเดลเสียงและโมเดลแปลภาษาก่อนเริ่มใช้ไมโครโฟน"
+                else "พิมพ์ข้อความภาษาไทยหรือจีนเพื่อเริ่มแปล")
+        }
+    }
 
     fun updateInput(input: String) {
         invalidateWork()
         mutableState.update {
             it.copy(
                 source = input,
-                translation = "", // NEVER show translation from a previous message.
+                translation = "",
                 translating = false,
-                status = if (input.isBlank()) "พิมพ์ข้อความภาษาไทยหรือจีนเพื่อเริ่มแปล"
-                         else "รอข้อความล่าสุด…"
+                status = if (input.isBlank()) "รอข้อความล่าสุด…" else "กำลังรับข้อความล่าสุด…"
             )
         }
-        if (input.isNotBlank()) scheduleTranslation(debounceMs = 850)
+        if (input.isNotBlank()) scheduleTranslation(850)
     }
 
     fun setDirection(direction: Direction) {
@@ -52,45 +92,158 @@ class InterpreterViewModel : ViewModel() {
         mutableState.update {
             it.copy(direction = direction, translation = "", translating = false)
         }
-        if (mutableState.value.source.isNotBlank()) scheduleTranslation(debounceMs = 0)
+        if (mutableState.value.source.isNotBlank()) scheduleTranslation(0)
     }
 
     fun translateNow() {
         invalidateWork()
-        if (mutableState.value.source.isNotBlank()) scheduleTranslation(debounceMs = 0)
+        if (mutableState.value.source.isNotBlank()) scheduleTranslation(0)
     }
 
     fun clear() {
+        voiceSession++
+        stopVoice()
         invalidateWork()
         mutableState.update {
             it.copy(source = "", translation = "", translating = false,
-                status = "พิมพ์ข้อความภาษาไทยหรือจีนเพื่อเริ่มแปล")
+                status = "ล้างคำแปลล่าสุดแล้ว")
         }
     }
 
     fun prepareModels() {
         if (downloadWork?.isActive == true) return
         downloadWork = viewModelScope.launch {
-            mutableState.update { it.copy(downloading = true, status = "กำลังดาวน์โหลดโมเดลผ่าน Wi-Fi…") }
+            mutableState.update { it.copy(downloading = true, status = "กำลังตรวจสอบโมเดลแปลภาษา (Wi-Fi)…") }
             try {
-                engine.prepareOnWifi()
-                mutableState.update {
-                    it.copy(prepared = true, status = "ติดตั้งโมเดลแล้ว • พร้อมใช้งานโดยไม่ต่ออินเทอร์เน็ต")
-                }
+                translator.prepareOnWifi()
+                modelFlags.edit().putBoolean("translate_prepared", true).apply()
+                mutableState.update { it.copy(prepared = true, status = "โมเดลแปลภาษาไทย–จีนพร้อมทำงานออฟไลน์") }
             } catch (cancel: CancellationException) {
                 throw cancel
-            } catch (error: Exception) {
-                mutableState.update {
-                    it.copy(status = "ดาวน์โหลดโมเดลไม่สำเร็จ: ตรวจสอบ Wi-Fi แล้วลองอีกครั้ง")
-                }
+            } catch (_: Exception) {
+                mutableState.update { it.copy(status = "ติดตั้งโมเดลแปลภาษาไม่สำเร็จ กรุณาเชื่อม Wi-Fi แล้วลองอีกครั้ง") }
             } finally {
                 mutableState.update { it.copy(downloading = false) }
             }
         }
     }
 
+    fun prepareSpeechModel() {
+        if (speechDownloadWork?.isActive == true || model.isReady()) {
+            if (model.isReady()) mutableState.update {
+                it.copy(speechReady = true, status = "โมเดลรู้จำเสียงอยู่บนโทรศัพท์แล้ว")
+            }
+            return
+        }
+        speechDownloadWork = viewModelScope.launch {
+            mutableState.update {
+                it.copy(speechDownloading = true, speechProgress = 0,
+                    status = "ดาวน์โหลดโมเดลเสียงหลายภาษา (~60 MB) ใช้อินเทอร์เน็ตเฉพาะครั้งแรก…")
+            }
+            try {
+                model.download { progress ->
+                    mutableState.update { it.copy(speechProgress = progress) }
+                }
+                mutableState.update {
+                    it.copy(speechReady = true, speechProgress = 100,
+                        status = "ติดตั้งโมเดลเสียงสำเร็จ • ใช้รู้จำเสียงบนเครื่องได้")
+                }
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (error: Exception) {
+                mutableState.update {
+                    it.copy(speechReady = false,
+                        status = "ดาวน์โหลดโมเดลเสียงไม่ได้: ${error.message ?: "ลองอีกครั้ง"}")
+                }
+            } finally {
+                mutableState.update { it.copy(speechDownloading = false) }
+            }
+        }
+    }
+
+    fun permissionDenied() {
+        mutableState.update { it.copy(status = "ต้องอนุญาตการใช้ไมโครโฟนจึงจะรับเสียงได้") }
+    }
+
+    fun startVoice() {
+        val snapshot = mutableState.value
+        if (snapshot.inputMode != InputMode.VOICE ||
+            snapshot.voicePreparing || snapshot.listening || snapshot.voiceProcessing) return
+        if (!model.isReady()) {
+            mutableState.update { it.copy(status = "กรุณาดาวน์โหลดโมเดลเสียงให้ครบก่อน (ครั้งเดียว)") }
+            return
+        }
+        if (!snapshot.prepared) {
+            mutableState.update { it.copy(status = "กรุณากดเตรียมโมเดลแปลภาษาไทย–จีน (Wi-Fi) ก่อน") }
+            return
+        }
+        if (ContextCompat.checkSelfPermission(getApplication(), Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED) {
+            permissionDenied()
+            return
+        }
+        voiceSession++
+        val session = voiceSession
+        invalidateWork()
+        mutableState.update {
+            it.copy(voicePreparing = true, listening = false, voiceProcessing = false,
+                source = "", translation = "", translating = false,
+                status = "กำลังเปิดโมเดล Whisper บนเครื่อง…")
+        }
+        voiceJob = viewModelScope.launch {
+            try {
+                voice.listen(
+                    modelFile = model.file,
+                    language = {
+                        when (mutableState.value.direction) {
+                            Direction.TH_TO_ZH -> "th"
+                            Direction.ZH_TO_TH -> "zh"
+                            Direction.AUTO -> "auto"
+                        }
+                    },
+                    onReady = {
+                        if (session == voiceSession) mutableState.update {
+                            it.copy(voicePreparing = false, listening = true, voiceProcessing = false,
+                                status = "กำลังฟัง… ระบบจะแปลเสียงเป็นช่วงประมาณ 7 วินาที")
+                        }
+                    },
+                    onTranscript = { recognized ->
+                        if (session == voiceSession && mutableState.value.inputMode == InputMode.VOICE) {
+                            updateInput(recognized)
+                        }
+                    },
+                    onWarning = { message ->
+                        if (session == voiceSession) mutableState.update { it.copy(status = message) }
+                    }
+                )
+                if (session == voiceSession) mutableState.update {
+                    it.copy(status = "หยุดฟังแล้ว ประมวลผลเสียงที่เหลือเสร็จแล้ว")
+                }
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (error: Exception) {
+                if (session == voiceSession) mutableState.update {
+                    it.copy(status = "โหมดเสียงขัดข้อง: ${error.message ?: "โปรดตรวจสอบสิทธิ์ไมโครโฟน"}")
+                }
+            } finally {
+                if (session == voiceSession) mutableState.update {
+                    it.copy(voicePreparing = false, listening = false, voiceProcessing = false)
+                }
+            }
+        }
+    }
+
+    fun stopVoice() {
+        if (voiceJob?.isActive != true) return
+        voice.requestStop()
+        mutableState.update {
+            it.copy(listening = false, voicePreparing = false, voiceProcessing = true,
+                status = "หยุดรับเสียงแล้ว กำลังถอดเสียงช่วงสุดท้าย…")
+        }
+    }
+
     private fun invalidateWork() {
-        requestNumber += 1
+        requestNumber++
         work?.cancel()
     }
 
@@ -103,53 +256,50 @@ class InterpreterViewModel : ViewModel() {
             if (original.isBlank()) return@launch
             val parsed = MessageRules.parse(original)
             if (parsed.body.isBlank()) return@launch
-            mutableState.update { it.copy(translating = true, status = "กำลังแปล…") }
+            mutableState.update { it.copy(translating = true, status = "กำลังแปลบนโทรศัพท์…") }
             try {
                 val detected = if (snapshot.direction == Direction.AUTO &&
                     MessageRules.scriptLanguage(parsed.body) == null
-                ) engine.identifyLanguage(parsed.body) else null
+                ) translator.identifyLanguage(parsed.body) else null
                 val resolved = MessageRules.chooseDirection(snapshot.direction, parsed.body, detected)
                 if (resolved == null) {
-                    if (generation == requestNumber) {
-                        mutableState.update {
-                            it.copy(translating = false,
-                                status = "ตรวจจับภาษาไม่ชัดเจน โปรดเลือก ไทย → 中文 หรือ 中文 → ไทย")
-                        }
+                    if (generation == requestNumber) mutableState.update {
+                        it.copy(translating = false,
+                            status = "ตรวจจับภาษาไม่ชัดเจน โปรดเลือก ไทย → 中文 หรือ 中文 → ไทย")
                     }
                     return@launch
                 }
-                val text = engine.translate(parsed.body, resolved)
-                // ML Kit tasks may finish after coroutine cancellation. Old translations cannot win.
+                // Voice mode NEVER attempts a translation-model download during recognition.
+                val text = translator.translate(
+                    parsed.body, resolved, offlineOnly = snapshot.inputMode == InputMode.VOICE
+                )
                 if (generation != requestNumber || original != mutableState.value.source) return@launch
                 mutableState.update {
                     it.copy(
                         translation = MessageRules.appendTranslation(parsed, text),
-                        translating = false,
-                        prepared = true,
-                        lastUsed = resolved,
+                        translating = false, lastUsed = resolved, prepared = true,
                         status = "แปลข้อความล่าสุดแล้ว • ${if (resolved == Direction.TH_TO_ZH) "ไทย → 中文" else "中文 → ไทย"}"
                     )
                 }
             } catch (cancel: CancellationException) {
                 throw cancel
-            } catch (error: Exception) {
-                if (generation == requestNumber) {
-                    mutableState.update {
-                        it.copy(
-                            translating = false,
-                            translation = "",
-                            status = "ไม่สามารถแปลได้: โปรดเชื่อมต่ออินเทอร์เน็ตเพื่อโหลดโมเดลครั้งแรก หรือกดเตรียมโมเดล"
-                        )
-                    }
+            } catch (_: Exception) {
+                if (generation == requestNumber) mutableState.update {
+                    it.copy(translating = false, translation = "",
+                        status = "แปลไม่สำเร็จ: กรุณาเตรียมโมเดลภาษาให้ครบก่อนใช้แบบออฟไลน์")
                 }
             }
         }
     }
 
     override fun onCleared() {
+        voiceSession++
+        voice.requestStop()
+        voiceJob?.cancel()
         invalidateWork()
         downloadWork?.cancel()
-        engine.close()
+        speechDownloadWork?.cancel()
+        translator.close()
         super.onCleared()
     }
 }
