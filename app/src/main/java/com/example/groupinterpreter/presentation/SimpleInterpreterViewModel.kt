@@ -7,11 +7,14 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.speech.RecognitionListener
+import android.speech.RecognitionSupport
+import android.speech.RecognitionSupportCallback
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.groupinterpreter.core.ChineseSpeechSupport
 import com.example.groupinterpreter.core.Direction
 import com.example.groupinterpreter.data.OnDeviceTranslationEngine
 import kotlinx.coroutines.CancellationException
@@ -117,7 +120,6 @@ class SimpleInterpreterViewModel(application: Application) : AndroidViewModel(ap
                     if (direction == Direction.TH_TO_ZH) "th-TH" else "zh-CN")
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE,
                     if (direction == Direction.TH_TO_ZH) "th-TH" else "zh-CN")
-                putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
                 putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
@@ -158,15 +160,6 @@ class SimpleInterpreterViewModel(application: Application) : AndroidViewModel(ap
                         else ->
                             "ระบบรู้จำเสียงบนโทรศัพท์ไม่พร้อม (รหัส $error) ลองใหม่หรือใช้ช่องพิมพ์"
                     }
-                    if (Build.VERSION.SDK_INT >= 33 &&
-                        error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE) {
-                        try {
-                            // Only requests an ON-DEVICE language pack from the OS.
-                            speech.triggerModelDownload(request)
-                        } catch (_: Exception) {
-                            // Some vendors require language pack setup through system Settings.
-                        }
-                    }
                     finishRecognizer()
                     mutable.update { it.copy(status = errorText, preview = "") }
                 }
@@ -177,6 +170,12 @@ class SimpleInterpreterViewModel(application: Application) : AndroidViewModel(ap
                     finishRecognizer()
                     if (text.isBlank()) {
                         mutable.update { it.copy(status = "ไม่ได้ยินข้อความที่ชัดเจน ลองใหม่") }
+                    } else if (direction == Direction.ZH_TO_TH &&
+                        !ChineseSpeechSupport.isChineseCharacters(text)) {
+                        mutable.update { it.copy(
+                            original = text, translated = "",
+                            status = "ระบบคืนตัวอักษรโรมัน ไม่ใช่ตัวอักษรจีน • ตรวจสอบโมเดลเสียงจีนกลาง (简体中文)"
+                        ) }
                     } else {
                         translate(text, direction)
                     }
@@ -190,23 +189,99 @@ class SimpleInterpreterViewModel(application: Application) : AndroidViewModel(ap
                 }
                 override fun onEvent(eventType: Int, params: Bundle?) = Unit
             })
+            if (direction == Direction.ZH_TO_TH && Build.VERSION.SDK_INT >= 33) {
+                mutable.update { it.copy(status = "กำลังตรวจสอบเสียงจีนกลางแบบออฟไลน์…") }
+                speech.checkRecognitionSupport(
+                    request, getApplication<Application>().mainExecutor,
+                    object : RecognitionSupportCallback {
+                        override fun onSupportResult(support: RecognitionSupport) {
+                            if (recognizer !== speech) return
+                            val installed = ChineseSpeechSupport.bestMainlandLanguage(
+                                support.installedOnDeviceLanguages)
+                            val downloadable = ChineseSpeechSupport.bestMainlandLanguage(
+                                support.supportedOnDeviceLanguages)
+                            val pending = ChineseSpeechSupport.bestMainlandLanguage(
+                                support.pendingOnDeviceLanguages)
+                            when {
+                                installed != null -> {
+                                    // Use actual locale provided by the device, not blindly zh-CN.
+                                    request.putExtra(RecognizerIntent.EXTRA_LANGUAGE, installed)
+                                    request.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, installed)
+                                    beginCapture(speech, request)
+                                }
+                                downloadable != null -> {
+                                    request.putExtra(RecognizerIntent.EXTRA_LANGUAGE, downloadable)
+                                    request.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, downloadable)
+                                    val message = try {
+                                        speech.triggerModelDownload(request)
+                                        "ขอให้ Android ดาวน์โหลดเสียงจีนกลางแบบออฟไลน์แล้ว • " +
+                                            "โปรดต่อ Wi-Fi ติดตั้งแพ็กภาษา แล้วกดพูดจีนอีกครั้ง"
+                                    } catch (_: Exception) {
+                                        "เครื่องรองรับเสียงจีน แต่ยังไม่ได้ติดตั้งแพ็กจีนกลาง • " +
+                                            "เปิดการตั้งค่าระบบรู้จำเสียงและดาวน์โหลดภาษา"
+                                    }
+                                    finishRecognizer()
+                                    mutable.update { it.copy(status = message) }
+                                }
+                                pending != null -> {
+                                    finishRecognizer()
+                                    mutable.update { it.copy(status =
+                                        "กำลังติดตั้งแพ็กเสียงจีนกลาง • กรุณาเชื่อม Wi-Fi แล้วลองอีกครั้ง") }
+                                }
+                                else -> {
+                                    finishRecognizer()
+                                    mutable.update { it.copy(status =
+                                        "ระบบรู้จำเสียงออฟไลน์ของเครื่องยังไม่รองรับเสียงจีนกลาง " +
+                                            "(简体中文) • โปรดติดตั้งแพ็กเสียงจีน หรือใช้ช่องพิมพ์แทน") }
+                                }
+                            }
+                        }
+
+                        override fun onError(error: Int) {
+                            if (recognizer !== speech) return
+                            if (error == SpeechRecognizer.ERROR_CANNOT_CHECK_SUPPORT) {
+                                // Older OEM implementations cannot report languages.
+                                // Try the *on-device* service only; no cloud recognizer fallback.
+                                beginCapture(speech, request)
+                            } else {
+                                finishRecognizer()
+                                mutable.update { it.copy(status =
+                                    "ตรวจสอบเสียงจีนกลางออฟไลน์ไม่ได้ (รหัส $error) • " +
+                                        "ตรวจสอบแพ็กภาษาในตั้งค่าโทรศัพท์") }
+                            }
+                        }
+                    }
+                )
+            } else {
+                beginCapture(speech, request)
+            }
+        } catch (e: Exception) {
+            finishRecognizer()
+            mutable.update { it.copy(status = "เปิดระบบเสียงออฟไลน์ไม่สำเร็จ: ${e.message ?: "ลองใหม่"}") }
+        }
+    }
+
+    private fun beginCapture(speech: SpeechRecognizer, request: Intent) {
+        if (recognizer !== speech) return
+        try {
             speech.startListening(request)
             voiceTimeout?.cancel()
             voiceTimeout = viewModelScope.launch {
                 delay(30_000)
                 if (recognizer === speech) {
-                    mutable.update { it.copy(status = "กำลังจบประโยคเพื่อแปล…") }
                     speech.stopListening()
+                    mutable.update { it.copy(status = "กำลังจบประโยคเพื่อแปล…") }
                     delay(7_000)
                     if (recognizer === speech) {
                         finishRecognizer()
-                        mutable.update { it.copy(status = "การรู้จำเสียงใช้เวลานานเกินไป กรุณาลองใหม่") }
+                        mutable.update { it.copy(status = "รอผลเสียงนานเกินไป กรุณาลองใหม่") }
                     }
                 }
             }
         } catch (e: Exception) {
             finishRecognizer()
-            mutable.update { it.copy(status = "เปิดระบบเสียงออฟไลน์ไม่สำเร็จ: ${e.message ?: "ลองใหม่"}") }
+            mutable.update { it.copy(status =
+                "เปิดระบบรู้จำเสียงบนเครื่องไม่ได้: ${e.message ?: "ลองใหม่"}") }
         }
     }
 

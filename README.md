@@ -1,4 +1,4 @@
-# ล่ามไทย–จีน รุ่นง่าย V2.0.0
+# ล่ามไทย–จีน รุ่นง่าย V2.1.0
 
 Android app: **พูดไทย → แปลจีน** / **说中文 → แปลไทย**. Press a single button, say one sentence, pause, read its translated text. No voice output, no speaker detection, no continuous-recording queue or large Whisper model.
 
@@ -28,3 +28,13 @@ https://github.com/kitiphichet-del/voice2text/actions/workflows/build-apk.yml
 - ML Kit on-device translation: https://developers.google.com/ml-kit/language/translation/android
 
 The APK build and unit tests run in GitHub Actions. Runtime compatibility and translation accuracy still require physical-device testing.
+
+
+## V2.1.0: fix Chinese speech recognition preflight
+- Mandarin voice still uses **zh-CN** spoken Mandarin, NOT Pinyin. Pinyin is romanization of Mandarin, e.g. "nǐ hǎo" corresponds to "你好".
+- On Android 13+ (API 33), Chinese microphone starts with `checkRecognitionSupport` to find an **installed on-device Mandarin pack** separately from Thai. Honor installed locale variants `zh-CN`, `cmn-Hans-CN`, `zh-Hans-CN`, etc.
+- If the device offers an offline Chinese language model but it is not installed, ask Android to download it (`triggerModelDownload`) and show instructions to connect Wi-Fi and retry. It may require approval in Android's system UI.
+- If the Android recognizer reports no supported on-device Mandarin, report that explicitly; **never switch to an online recognizer without consent**.
+- If the speech engine produces Latin/Pinyin instead of Chinese characters, display the recognized text and warn; do not feed Pinyin blindly into Chinese→Thai translation.
+- Android 12 (API 31–32) cannot query a per-language support list through this API; speech is attempted using the on-device recognizer with normal language error feedback.
+- APK compilation and unit tests in GitHub Actions are not a substitute for testing the target phone. A Chinese pack may not exist for every Android device/vendor.

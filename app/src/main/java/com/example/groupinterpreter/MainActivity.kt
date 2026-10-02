@@ -240,7 +240,8 @@ private fun SimpleScreen(
             } else {
                 Text(
                     "ใช้ระบบรู้จำเสียงบนเครื่องของ Android เท่านั้น " +
-                        "หากไม่มีแพ็กภาษาไทยหรือจีนในเครื่อง จะมีข้อความแจ้งให้ติดตั้ง " +
+                        "เมื่อกดพูดจีน แอปจะตรวจแพ็กจีนกลางออฟไลน์ก่อน " +
+                        "หากยังไม่มี จะขอให้ Android ดาวน์โหลดโมเดลภาษาจีน " +
                         "ไม่มีการอัปโหลดเสียงโดยแอป",
                     fontSize = 12.sp, color = Muted, lineHeight = 19.sp
                 )
@@ -272,7 +273,7 @@ private fun SimpleScreen(
             }
 
             Text(
-                "V 2.0.0  •  แปลข้อความอย่างเดียว ไม่มีเสียงพูดกลับ",
+                "V 2.1.0  •  แปลข้อความอย่างเดียว ไม่มีเสียงพูดกลับ",
                 color = Muted, fontSize = 11.sp,
                 textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
             )
