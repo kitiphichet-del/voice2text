@@ -27,6 +27,8 @@ class VoiceCaptureEngine {
     private val stopRequested = AtomicBoolean(false)
     @Volatile private var recorder: AudioRecord? = null
 
+    fun prepareStart() { stopRequested.set(false) }
+
     fun requestStop() {
         stopRequested.set(true)
         try {
@@ -42,13 +44,14 @@ class VoiceCaptureEngine {
         onTranscript: (String) -> Unit,
         onWarning: (String) -> Unit
     ) {
-        stopRequested.set(false)
+        if (stopRequested.get()) return
         var nativeContext = 0L
         try {
             nativeContext = withContext(Dispatchers.Default) {
                 WhisperBridge.load(modelFile.absolutePath)
             }
             require(nativeContext != 0L) { "เปิดโมเดลเสียงไม่ได้ กรุณาดาวน์โหลดอีกครั้ง" }
+            if (stopRequested.get()) return
             val handle = nativeContext
             coroutineScope {
                 val queue = Channel<FloatArray>(capacity = 3)
@@ -60,6 +63,7 @@ class VoiceCaptureEngine {
                 }
                 try {
                     withContext(Dispatchers.IO) {
+                        if (stopRequested.get()) return@withContext
                         val min = AudioRecord.getMinBufferSize(
                             RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
                         )
@@ -82,6 +86,7 @@ class VoiceCaptureEngine {
                         var filled = 0
                         var amplitude = 0.0
                         try {
+                            if (stopRequested.get()) return@withContext
                             audio.startRecording()
                             onReady()
                             while (currentCoroutineContext().isActive && !stopRequested.get()) {
