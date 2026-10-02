@@ -1,0 +1,265 @@
+package com.example.groupinterpreter
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.viewModels
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.groupinterpreter.core.Direction
+import com.example.groupinterpreter.presentation.InterpreterState
+import com.example.groupinterpreter.presentation.InterpreterViewModel
+
+private val Indigo = Color(0xFF234783)
+private val DeepInk = Color(0xFF192C46)
+private val Muted = Color(0xFF53647A)
+private val Sky = Color(0xFFE7F1FD)
+private val Canvas = Color(0xFFF7F9FC)
+
+class MainActivity : ComponentActivity() {
+    private val interpreter: InterpreterViewModel by viewModels()
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            MaterialTheme(
+                colorScheme = lightColorScheme(
+                    primary = Indigo,
+                    onPrimary = Color.White,
+                    background = Canvas,
+                    surface = Color.White,
+                    onSurface = DeepInk
+                )
+            ) {
+                val state by interpreter.state.collectAsState()
+                InterpreterScreen(
+                    state = state,
+                    onText = interpreter::updateInput,
+                    onMode = interpreter::setDirection,
+                    onTranslate = interpreter::translateNow,
+                    onClear = interpreter::clear,
+                    onPrepare = interpreter::prepareModels
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun InterpreterScreen(
+    state: InterpreterState,
+    onText: (String) -> Unit,
+    onMode: (Direction) -> Unit,
+    onTranslate: () -> Unit,
+    onClear: () -> Unit,
+    onPrepare: () -> Unit
+) {
+    val clipboard = LocalClipboardManager.current
+    Surface(modifier = Modifier.fillMaxSize(), color = Canvas) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 18.dp, vertical = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(15.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(color = Indigo, shape = RoundedCornerShape(17.dp)) {
+                    Text(
+                        "文 ⇄ ก",
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                        color = Color.White,
+                        fontSize = 21.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(Modifier.width(13.dp))
+                Column {
+                    Text("ล่ามไทย–จีน", fontSize = 25.sp, color = DeepInk, fontWeight = FontWeight.Bold)
+                    Text("THAI  ↔  简体中文  •  ข้อความเท่านั้น", fontSize = 12.sp, color = Muted)
+                }
+            }
+
+            Surface(color = Sky, shape = RoundedCornerShape(14.dp)) {
+                Text(
+                    "สำหรับการสนทนาแบบกลุ่ม · ไม่ตอบคำถามแทนผู้พูด · แสดงคำแปลล่าสุดเท่านั้น",
+                    modifier = Modifier.padding(14.dp),
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp,
+                    color = Indigo
+                )
+            }
+
+            Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
+                Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("ทิศทางการแปล", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        DirectionChoice("อัตโนมัติ", Direction.AUTO, state.direction, onMode, Modifier.weight(1f))
+                        DirectionChoice("ไทย → 中文", Direction.TH_TO_ZH, state.direction, onMode, Modifier.weight(1.2f))
+                        DirectionChoice("中文 → ไทย", Direction.ZH_TO_TH, state.direction, onMode, Modifier.weight(1.2f))
+                    }
+                }
+            }
+
+            Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp)) {
+                Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("01  ข้อความต้นฉบับ", fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                        TextButton(onClick = onClear, enabled = state.source.isNotEmpty()) { Text("ล้างข้อความ") }
+                    }
+                    OutlinedTextField(
+                        value = state.source,
+                        onValueChange = onText,
+                        modifier = Modifier.fillMaxWidth().height(175.dp),
+                        placeholder = { Text("พิมพ์หรือวางข้อความ…\nเช่น คุณหวัง: 下午两点出发。") },
+                        singleLine = false,
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                    Text("หยุดพิมพ์ประมาณ 1 วินาที ระบบจะเริ่มแปลให้เอง", fontSize = 12.sp, color = Muted)
+                    Button(
+                        onClick = onTranslate,
+                        enabled = !state.translating && state.source.isNotBlank(),
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(11.dp)
+                    ) { Text("แปลด้วย Google Translate", modifier = Modifier.padding(vertical = 5.dp)) }
+                }
+            }
+
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                border = BorderStroke(1.dp, Color(0xFFD7E2F0)),
+                shape = RoundedCornerShape(18.dp)
+            ) {
+                Column(modifier = Modifier.fillMaxWidth().padding(17.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("02  คำแปลล่าสุด", fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                        OutlinedButton(
+                            onClick = { clipboard.setText(AnnotatedString(state.translation)) },
+                            enabled = state.translation.isNotBlank()
+                        ) { Text("คัดลอก") }
+                    }
+                    HorizontalDivider(color = Color(0xFFEDF1F6))
+                    Box(
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 160.dp).background(Canvas, RoundedCornerShape(12.dp))
+                            .padding(16.dp),
+                        contentAlignment = if (state.translation.isBlank()) Alignment.Center else Alignment.TopStart
+                    ) {
+                        if (state.translating && state.translation.isBlank()) {
+                            CircularProgressIndicator(color = Indigo)
+                        } else if (state.translation.isNotBlank()) {
+                            SelectionContainer {
+                                Text(state.translation, color = DeepInk, fontSize = 20.sp, lineHeight = 31.sp)
+                            }
+                        } else {
+                            Text("ข้อความที่แปลแล้วจะปรากฏตรงนี้", fontSize = 14.sp, color = Muted, textAlign = TextAlign.Center)
+                        }
+                    }
+                    // Attribution is separate from translated content, as required by Google.
+                    Text("Powered by Google Translate", fontSize = 11.sp, color = Muted)
+                }
+            }
+
+            Surface(color = Color(0xFFEEF3F8), shape = RoundedCornerShape(13.dp)) {
+                Row(modifier = Modifier.fillMaxWidth().padding(13.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (state.translating || state.downloading) {
+                        CircularProgressIndicator(modifier = Modifier.width(17.dp).height(17.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(9.dp))
+                    }
+                    Text(state.status, modifier = Modifier.weight(1f), fontSize = 12.sp, color = DeepInk, lineHeight = 19.sp)
+                }
+            }
+
+            OutlinedButton(
+                onClick = onPrepare,
+                enabled = !state.downloading,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Text(if (state.prepared) "ตรวจสอบ / ดาวน์โหลดโมเดลอีกครั้ง (Wi-Fi)" else "เตรียมโมเดลภาษาไทย–จีน (Wi-Fi)")
+            }
+            Text(
+                "หลังจากดาวน์โหลดโมเดลแล้ว แปลบนเครื่องได้โดยไม่ส่งข้อความไปยังเซิร์ฟเวอร์ " +
+                    "• ไม่ใช้ไมโครโฟน • ไม่มีประวัติสนทนาที่จัดเก็บโดยแอป",
+                fontSize = 11.sp,
+                lineHeight = 18.sp,
+                color = Muted,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Text(
+                "V 1.0.0  •  Android 8.0+",
+                fontSize = 11.sp,
+                color = Muted,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+}
+
+@Composable
+private fun DirectionChoice(
+    label: String,
+    option: Direction,
+    active: Direction,
+    onClick: (Direction) -> Unit,
+    modifier: Modifier
+) {
+    val selected = option == active
+    Surface(
+        modifier = modifier.selectable(selected = selected, onClick = { onClick(option) }),
+        color = if (selected) Sky else Color.Transparent,
+        shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(1.dp, if (selected) Indigo else Color(0xFFDDE5EF))
+    ) {
+        Text(
+            label,
+            fontSize = 11.sp,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+            color = if (selected) Indigo else DeepInk,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            modifier = Modifier.padding(vertical = 12.dp, horizontal = 2.dp)
+        )
+    }
+}
