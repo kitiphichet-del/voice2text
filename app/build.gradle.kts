@@ -11,32 +11,13 @@ android {
         applicationId = "com.example.groupinterpreter"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2.0"
-        ndk {
-            abiFilters += listOf("arm64-v8a")
-        }
-        externalNativeBuild {
-            cmake {
-                arguments += listOf("-DCMAKE_BUILD_TYPE=Release")
-            }
-        }
+        versionCode = 4
+        versionName = "2.0.0"
     }
     buildTypes {
-        release {
-            isMinifyEnabled = false
-        }
+        release { isMinifyEnabled = false }
     }
-    ndkVersion = "27.2.12479018"
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
-        }
-    }
-    buildFeatures {
-        compose = true
-    }
+    buildFeatures { compose = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -47,13 +28,9 @@ android {
         }
     }
 }
-
 kotlin {
-    compilerOptions {
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
-    }
+    compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
 }
-
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2025.12.00")
     implementation(composeBom)

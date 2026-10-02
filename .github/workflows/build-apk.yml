@@ -1,4 +1,4 @@
-name: Build Thai-Chinese Android APK
+name: Build Simple Thai-Chinese APK
 on:
   workflow_dispatch:
   push:
@@ -6,7 +6,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 25
     permissions:
       contents: read
     steps:
@@ -19,17 +19,17 @@ jobs:
           java-version: '17'
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
-      - name: Install Android SDK, NDK and CMake
-        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'ndk;27.2.12479018' 'cmake;3.22.1'
+      - name: Install Android SDK API 36
+        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
       - name: Install Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.13'
-      - name: Run unit tests and build offline voice APK
+      - name: Unit tests and APK
         run: gradle --no-daemon --max-workers=2 :app:testDebugUnitTest :app:assembleDebug
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ThaiChineseOfflineVoice-v1.2.0-apk
+          name: ThaiChineseSimpleOffline-v2.0.0-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
